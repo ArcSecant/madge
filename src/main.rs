@@ -1,8 +1,12 @@
+use std::time::Duration;
+
 use bevy::{
     core::FixedTimestep,
     math::{const_vec2, Vec3Swizzles},
     prelude::*,
 };
+
+use rand::{thread_rng, Rng};
 
 const TIME_STEP: f32 = 1.0 / 60.0;
 const BOUNDS: Vec2 = const_vec2!([1200.0, 640.0]);
@@ -15,8 +19,10 @@ fn main() {
         .add_system_set(
             SystemSet::new()
                 .with_run_criteria(FixedTimestep::step(TIME_STEP as f64))
+                .with_system(setup_spawn_enemy)
                 .with_system(player_movement_system)
-                .with_system(player_shooting_system),
+                .with_system(player_shooting_system)
+                .with_system(move_enemy_system),
         )
         .add_system(bevy::input::system::exit_on_esc_system)
         .run()
@@ -30,15 +36,24 @@ struct Player {
     rotation_speed: f32,
 }
 
-#[derive(Component, Debug, Default)]
+#[derive(Component, Debug)]
 struct Bullet {
     velocity: f32,
     direction: Vec3,
 }
 
+#[derive(Component, Debug)]
+struct Enemy {
+    velocity: f32,
+}
+
 #[derive(Default)]
 struct GameState {
     score: usize,
+}
+
+struct EnemySpawnConfig {
+    timer: Timer,
 }
 
 fn setup(
@@ -89,18 +104,68 @@ fn setup(
         ..Default::default()
     });
     commands.spawn_bundle(bullet).insert(Bullet {
-        velocity: 1000.0,
+        velocity: 750.0,
         direction: 1.0 * Vec3::Y,
     });
     commands.spawn_bundle(player).insert(Player {
         velocity: 500.0,
         rotation_speed: f32::to_radians(360.0),
     });
+    commands.insert_resource(EnemySpawnConfig {
+        timer: Timer::new(Duration::from_millis(500), true),
+    });
+}
+
+fn setup_spawn_enemy(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut config: ResMut<EnemySpawnConfig>,
+) {
+    let mut rng = thread_rng();
+
+    let rand_angle = rng.gen::<f32>() * 2.0 * std::f32::consts::PI;
+    let (x, y) = rand_angle.sin_cos();
+
+    let enemy = SpriteBundle {
+        sprite: Sprite {
+            color: Color::rgb(0.25, 0.0, 0.0),
+            custom_size: Some(Vec2::new(15.0, 15.0)),
+            ..default()
+        },
+        transform: Transform::from_xyz(x * 400.0, y * 400.0, 0.0),
+        ..default()
+    };
+
+    config.timer.tick(time.delta());
+
+    if config.timer.finished() {
+        commands
+            .spawn_bundle(enemy)
+            .insert(Enemy { velocity: 250.0 });
+    }
+}
+
+fn move_enemy_system(
+    enemy_entities: Query<Entity, With<Enemy>>,
+    mut set: ParamSet<(
+        Query<(&Enemy, &mut Transform)>,
+        Query<(&Player, &Transform)>,
+    )>,
+) {
+    let player_query = set.p1();
+    let (_, player_transform) = player_query.single();
+    let player_position = player_transform.translation;
+
+    for entity in enemy_entities.iter() {
+        if let Ok((enemy, mut enemy_transform)) = set.p0().get_mut(entity) {
+            let direction = player_position - enemy_transform.translation;
+            enemy_transform.translation += direction.normalize() * enemy.velocity * TIME_STEP;
+        }
+    }
 }
 
 fn player_shooting_system(
     mut commands: Commands,
-    mut game_state: ResMut<GameState>,
     bullet_entities: Query<Entity, With<Bullet>>,
     mut set: ParamSet<(
         Query<(&Bullet, &mut Transform)>,
@@ -123,7 +188,7 @@ fn player_shooting_system(
         ..default()
     };
     let new_bullet = Bullet {
-        velocity: 1000.0,
+        velocity: 750.0,
         direction: player_direction,
     };
     commands.spawn_bundle(bullet).insert(new_bullet);
