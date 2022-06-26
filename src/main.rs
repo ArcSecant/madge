@@ -11,10 +11,17 @@ use rand::{thread_rng, Rng};
 const TIME_STEP: f32 = 1.0 / 60.0;
 const BOUNDS: Vec2 = const_vec2!([1200.0, 640.0]);
 
+#[derive(Clone, Eq, PartialEq, Debug, Hash)]
+enum GameState {
+    Playing,
+    GameOver,
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .init_resource::<GameState>()
+        .init_resource::<Game>()
+        .add_state(GameState::Playing)
         .add_startup_system(setup)
         .add_system_set(
             SystemSet::new()
@@ -22,8 +29,11 @@ fn main() {
                 .with_system(setup_spawn_enemy)
                 .with_system(player_movement_system)
                 .with_system(player_shooting_system)
-                .with_system(move_enemy_system),
+                .with_system(move_enemy_system)
+                .with_system(bullet_enemy_collision_system)
+                .with_system(enemy_player_collions_system),
         )
+        .add_system_set(SystemSet::on_exit(GameState::Playing).with_system(teardown))
         .add_system(bevy::input::system::exit_on_esc_system)
         .run()
 }
@@ -48,20 +58,17 @@ struct Enemy {
 }
 
 #[derive(Default)]
-struct GameState {
+struct Game {
     score: usize,
 }
 
-struct EnemySpawnConfig {
-    timer: Timer,
+struct TimerConfig {
+    enemy_timer: Timer,
+    bullet_timer: Timer,
 }
 
-fn setup(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut game_state: ResMut<GameState>,
-) {
-    game_state.score = 0;
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>, mut game: ResMut<Game>) {
+    game.score = 0;
 
     let player = SpriteBundle {
         sprite: Sprite {
@@ -96,11 +103,7 @@ fn setup(
 
     commands.spawn_bundle(OrthographicCameraBundle::new_2d());
     commands.spawn_bundle(Text2dBundle {
-        text: Text::with_section(
-            game_state.score.to_string(),
-            text_style,
-            text_alignment_topleft,
-        ),
+        text: Text::with_section(game.score.to_string(), text_style, text_alignment_topleft),
         ..Default::default()
     });
     commands.spawn_bundle(bullet).insert(Bullet {
@@ -111,16 +114,52 @@ fn setup(
         velocity: 500.0,
         rotation_speed: f32::to_radians(360.0),
     });
-    commands.insert_resource(EnemySpawnConfig {
-        timer: Timer::new(Duration::from_millis(500), true),
+    commands.insert_resource(TimerConfig {
+        enemy_timer: Timer::new(Duration::from_millis(500), true),
+        bullet_timer: Timer::new(Duration::from_millis(50), true),
     });
 }
 
-fn setup_spawn_enemy(
+fn bullet_enemy_collision_system(
     mut commands: Commands,
-    time: Res<Time>,
-    mut config: ResMut<EnemySpawnConfig>,
+    bullet_entities: Query<Entity, With<Bullet>>,
+    enemy_entities: Query<Entity, With<Enemy>>,
+    query: Query<&Transform>,
+    mut game: ResMut<Game>,
 ) {
+    for bullet_entity in bullet_entities.iter() {
+        for enemy_entity in enemy_entities.iter() {
+            if let Ok(bullet) = query.get(bullet_entity) {
+                if let Ok(enemy) = query.get(enemy_entity) {
+                    if bullet.translation.distance(enemy.translation) <= 10.0 {
+                        commands.entity(bullet_entity).despawn_recursive();
+                        commands.entity(enemy_entity).despawn_recursive();
+                        game.score += 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn enemy_player_collions_system(
+    mut state: ResMut<State<GameState>>,
+    player_query: Query<(&Player, &Transform)>,
+    enemy_entities: Query<Entity, With<Enemy>>,
+    query: Query<&Transform>,
+) {
+    let (_, player_transform) = player_query.single();
+    let player_position = player_transform.translation;
+    for entity in enemy_entities.iter() {
+        if let Ok(enemy_transform) = query.get(entity) {
+            if enemy_transform.translation.distance(player_position) <= 15.0 {
+                state.overwrite_set(GameState::GameOver);
+            }
+        }
+    }
+}
+
+fn setup_spawn_enemy(mut commands: Commands, time: Res<Time>, mut config: ResMut<TimerConfig>) {
     let mut rng = thread_rng();
 
     let rand_angle = rng.gen::<f32>() * 2.0 * std::f32::consts::PI;
@@ -136,9 +175,9 @@ fn setup_spawn_enemy(
         ..default()
     };
 
-    config.timer.tick(time.delta());
+    config.enemy_timer.tick(time.delta());
 
-    if config.timer.finished() {
+    if config.enemy_timer.finished() {
         commands
             .spawn_bundle(enemy)
             .insert(Enemy { velocity: 250.0 });
@@ -171,6 +210,8 @@ fn player_shooting_system(
         Query<(&Bullet, &mut Transform)>,
         Query<(&Player, &Transform)>,
     )>,
+    time: Res<Time>,
+    mut config: ResMut<TimerConfig>,
 ) {
     let player_query = set.p1();
     let (_, player_transform) = player_query.single();
@@ -178,20 +219,26 @@ fn player_shooting_system(
     let player_position = player_transform.translation;
     let player_direction = player_transform.rotation * Vec3::Y;
 
-    let bullet = SpriteBundle {
-        sprite: Sprite {
-            color: Color::rgb(0.25, 0.25, 0.25),
-            custom_size: Some(Vec2::new(5.0, 5.0)),
+    config.bullet_timer.tick(time.delta());
+
+    if config.bullet_timer.finished() {
+        let bullet = SpriteBundle {
+            sprite: Sprite {
+                color: Color::rgb(0.25, 0.25, 0.25),
+                custom_size: Some(Vec2::new(5.0, 5.0)),
+                ..default()
+            },
+            transform: Transform::from_translation(player_position),
             ..default()
-        },
-        transform: Transform::from_translation(player_position),
-        ..default()
-    };
-    let new_bullet = Bullet {
-        velocity: 750.0,
-        direction: player_direction,
-    };
-    commands.spawn_bundle(bullet).insert(new_bullet);
+        };
+
+        let new_bullet = Bullet {
+            velocity: 750.0,
+            direction: player_direction,
+        };
+
+        commands.spawn_bundle(bullet).insert(new_bullet);
+    }
 
     for entity in bullet_entities.iter() {
         if let Ok((bullet, mut bullet_transform)) = set.p0().get_mut(entity) {
@@ -251,4 +298,10 @@ fn player_movement_system(
 
     let extents = Vec3::from((BOUNDS / 2.0, 0.0));
     transform.translation = transform.translation.min(extents).max(-extents);
+}
+
+fn teardown(mut commands: Commands, entities: Query<Entity, Without<Player>>) {
+    for entity in entities.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
 }
